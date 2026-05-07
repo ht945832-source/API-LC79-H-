@@ -1,0 +1,25 @@
+{
+  "name": "tele68-taixiu-ai",
+  "version": "1.0.0",
+  "description": "Cầu Tài Xỉu Tele68 với hàng ngàn pattern + AI học",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.2",
+    "ws": "^8.14.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "keywords": ["taixiu", "tele68", "cau", "ai", "prediction"],
+  "author": "@tranhoang2286",
+  "license": "MIT"
+}
