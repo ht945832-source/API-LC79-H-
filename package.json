@@ -1,16 +1,9 @@
 {
-  "name": "tele68-taixiu-ai",
-  "version": "1.0.0",
-  "description": "Cầu Tài Xỉu Tele68 AI",
-  "main": "app.js",
-  "scripts": {
-    "start": "node app.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "axios": "^1.6.2"
-  },
-  "engines": {
-    "node": "18.17.0"
-  }
+  "name": "tele68-taixiu-full-cau",
+  "version": "4.0.0",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.18.2", "axios": "^1.6.0" },
+  "engines": { "node": ">=16.0.0" },
+  "author": "@tranhoang2286"
 }
