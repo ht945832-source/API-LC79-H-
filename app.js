@@ -6,565 +6,407 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const API_URL = 'https://wtx.tele68.com/v1/tx/sessions';
-const HISTORY_FILE = 'predictions.json';
+const HISTORY_FILE = 'predictions_safe.json';
 
 let predictionsDB = [];
+let lastFetchTime = 0;
+let cachedHistory = null;
 
-// ======================= THƯ VIỆN CẦU =======================
-
-// 1. Cầu Bệt (2-15 phiên)
-function phatHienBet(results, minLen) {
-    if (results.length < minLen) return null;
-    let streak = 1;
-    for (let i = 1; i < minLen; i++) {
-        if (results[i] === results[0]) streak++;
-        else return null;
+// ======================= HÀM KIỂM TRA API (CACHE 5 GIÂY) =======================
+async function checkApiStatus() {
+    const now = Date.now();
+    if (cachedHistory && (now - lastFetchTime) < 5000) {
+        return cachedHistory;
     }
-    return {
-        type: 'Cầu Bệt',
-        prediction: results[0] === 'TAI' ? 'Tài' : 'Xỉu',
-        confidence: Math.min(88, 50 + minLen * 4),
-        detail: `${minLen} phiên ${results[0] === 'TAI' ? 'Tài' : 'Xỉu'} liên tiếp`
-    };
-}
-
-// 2. Cầu 1-1 (Ziczac chuẩn)
-function phatHienZiczac11(results, len) {
-    if (results.length < len) return null;
-    for (let i = 0; i < len - 1; i++) {
-        if (results[i] === results[i+1]) return null;
-    }
-    let last = results[len-1];
-    let next = last === 'TAI' ? 'Xỉu' : 'Tài';
-    return {
-        type: 'Cầu 1-1 (Ziczac)',
-        prediction: next,
-        confidence: Math.min(85, 55 + len * 2.5),
-        detail: `Đảo ${len} phiên liên tiếp, chạm đuôi ${last === 'TAI' ? 'Tài' : 'Xỉu'}`
-    };
-}
-
-// 3. Cầu 2-2 (TTXX TTXX)
-function phatHien22(results, capSo) {
-    if (results.length < capSo * 2) return null;
-    let pattern = [];
-    for (let i = 0; i < capSo * 2; i += 2) {
-        if (results[i] !== results[i+1]) return null;
-        pattern.push(results[i]);
-    }
-    for (let i = 1; i < pattern.length; i++) {
-        if (pattern[i] === pattern[i-1]) return null;
-    }
-    let lastPair = pattern[pattern.length-1];
-    return {
-        type: 'Cầu 2-2',
-        prediction: lastPair === 'TAI' ? 'Xỉu' : 'Tài',
-        confidence: Math.min(84, 60 + capSo * 3),
-        detail: `${capSo} cặp đảo (${pattern.map(p => p === 'TAI' ? 'T' : 'X').join('')})`
-    };
-}
-
-// 4. Cầu 3-3
-function phatHien33(results, blocks) {
-    if (results.length < blocks * 3) return null;
-    let triples = [];
-    for (let i = 0; i < blocks * 3; i += 3) {
-        if (results[i] !== results[i+1] || results[i+1] !== results[i+2]) return null;
-        triples.push(results[i]);
-    }
-    for (let i = 1; i < triples.length; i++) {
-        if (triples[i] === triples[i-1]) return null;
-    }
-    let lastBlock = triples[triples.length-1];
-    return {
-        type: 'Cầu 3-3',
-        prediction: lastBlock === 'TAI' ? 'Xỉu' : 'Tài',
-        confidence: Math.min(86, 62 + blocks * 2.5),
-        detail: `${blocks} bộ ba đảo`
-    };
-}
-
-// 5. Cầu 4-4
-function phatHien44(results, blocks) {
-    if (results.length < blocks * 4) return null;
-    let quads = [];
-    for (let i = 0; i < blocks * 4; i += 4) {
-        if (results[i] !== results[i+1] || results[i+1] !== results[i+2] || results[i+2] !== results[i+3]) return null;
-        quads.push(results[i]);
-    }
-    for (let i = 1; i < quads.length; i++) {
-        if (quads[i] === quads[i-1]) return null;
-    }
-    let lastQuad = quads[quads.length-1];
-    return {
-        type: 'Cầu 4-4 (Siêu chuẩn)',
-        prediction: lastQuad === 'TAI' ? 'Xỉu' : 'Tài',
-        confidence: Math.min(88, 65 + blocks * 2),
-        detail: `${blocks} bộ bốn đảo`
-    };
-}
-
-// 6. Cầu 5-5
-function phatHien55(results, blocks) {
-    if (results.length < blocks * 5) return null;
-    let quints = [];
-    for (let i = 0; i < blocks * 5; i += 5) {
-        let ok = true;
-        for (let j = 0; j < 4; j++) {
-            if (results[i+j] !== results[i+j+1]) { ok = false; break; }
+    
+    try {
+        const res = await axios.get(API_URL, { timeout: 8000 });
+        if (res.status === 200 && res.data && res.data.list) {
+            cachedHistory = res.data.list;
+            lastFetchTime = now;
+            return cachedHistory;
         }
-        if (!ok) return null;
-        quints.push(results[i]);
+        return cachedHistory || null;
+    } catch(e) {
+        console.log('❌ API tele68 lỗi:', e.message);
+        return cachedHistory || null;
     }
-    for (let i = 1; i < quints.length; i++) if (quints[i] === quints[i-1]) return null;
-    return {
-        type: 'Cầu 5-5 (Sảnh Rồng)',
-        prediction: quints[quints.length-1] === 'TAI' ? 'Xỉu' : 'Tài',
-        confidence: Math.min(90, 68 + blocks * 1.5),
-        detail: `${blocks} bộ năm đảo`
-    };
 }
 
-// 7. Cầu 1-2-1
-function phatHien121(results) {
-    if (results.length < 4) return null;
-    let a = results[0], b = results[1], c = results[2], d = results[3];
-    if (a !== b && b === c && c !== d && a === d) {
-        return {
-            type: 'Cầu 1-2-1 (Vẩy rồng)',
-            prediction: a === 'TAI' ? 'Tài' : 'Xỉu',
-            confidence: 82,
-            detail: `Mẫu ${a === 'TAI' ? 'T' : 'X'}${b === 'TAI' ? 'T' : 'X'}${c === 'TAI' ? 'T' : 'X'}${d === 'TAI' ? 'T' : 'X'}`
-        };
+// ======================= 15+ CẦU CHUẨN =======================
+function phatHienCau(history) {
+    if (!history || history.length < 3) {
+        return { prediction: 'Tài', confidence: 50, reason: '📊 Chưa đủ 3 phiên, dự đoán Tài' };
     }
-    return null;
-}
-
-// 8. Cầu 2-1-2
-function phatHien212(results) {
-    if (results.length < 5) return null;
-    let a = results[0], b = results[1], c = results[2], d = results[3], e = results[4];
-    if (a === b && b !== c && c === d && d !== e && a !== c) {
-        return {
-            type: 'Cầu 2-1-2',
-            prediction: a === 'TAI' ? 'Xỉu' : 'Tài',
-            confidence: 83,
-            detail: `Mẫu ${a === 'TAI' ? 'T' : 'X'}${a === 'TAI' ? 'T' : 'X'}${c === 'TAI' ? 'T' : 'X'}${c === 'TAI' ? 'T' : 'X'}${e === 'TAI' ? 'T' : 'X'}`
-        };
-    }
-    return null;
-}
-
-// 9. Cầu 1-2-3 (tăng dần block)
-function phatHien123(results) {
-    if (results.length < 6) return null;
-    let block1 = results[0] === results[1] && results[1] === results[2];
-    let block2 = results[3] === results[4];
-    let check = results[5];
-    if (block1 && block2 && results[0] !== results[3] && results[3] !== check) {
-        return {
-            type: 'Cầu 1-2-3 (Thang máy)',
-            prediction: check === 'TAI' ? 'Tài' : 'Xỉu',
-            confidence: 80,
-            detail: `3T/3X - 2T/2X - 1 (${check === 'TAI' ? 'Tài' : 'Xỉu'})`
-        };
-    }
-    return null;
-}
-
-// 10. Cầu 3-2-1
-function phatHien321(results) {
-    if (results.length < 6) return null;
-    let block1 = results[0] === results[1];
-    let block2 = results[2] === results[3] && results[3] === results[4];
-    let check = results[5];
-    if (block1 && block2 && results[0] !== results[2] && results[2] !== check) {
-        return {
-            type: 'Cầu 3-2-1 (Lùi dần)',
-            prediction: results[2] === 'TAI' ? 'Tài' : 'Xỉu',
-            confidence: 80,
-            detail: `1T/1X - 3T/3X - 2 (${check === 'TAI' ? 'Tài' : 'Xỉu'})`
-        };
-    }
-    return null;
-}
-
-// 11. Cầu nhảy cóc (cách 1 phiên)
-function phatHienNhayCoc(results, step) {
-    if (results.length < step * 2 + 1) return null;
-    let hops = [];
-    for (let i = 0; i <= step * 2; i += step) hops.push(results[i]);
-    let allSame = hops.every(h => h === hops[0]);
-    if (allSame && hops.length >= 2) {
-        return {
-            type: `Cầu nhảy cóc bậc ${step}`,
-            prediction: hops[0] === 'TAI' ? 'Tài' : 'Xỉu',
-            confidence: 75,
-            detail: `Cách ${step} phiên, tất cả đều ${hops[0] === 'TAI' ? 'Tài' : 'Xỉu'}`
-        };
-    }
-    let alternating = true;
-    for (let i = 1; i < hops.length; i++) if (hops[i] === hops[i-1]) alternating = false;
-    if (alternating && hops.length >= 3) {
-        let next = hops[hops.length-1] === 'TAI' ? 'Xỉu' : 'Tài';
-        return {
-            type: `Cầu nhảy cóc bậc ${step} đảo`,
-            prediction: next,
-            confidence: 78,
-            detail: `Cách ${step} phiên, pattern đảo`
-        };
-    }
-    return null;
-}
-
-// 12. Cầu gương (palindrome)
-function phatHienGuong(results, len) {
-    if (results.length < len) return null;
-    let slice = results.slice(0, len);
-    let ok = true;
-    for (let i = 0; i < len / 2; i++) if (slice[i] !== slice[len-1-i]) ok = false;
-    if (ok && len % 2 === 0) {
-        let mid = len / 2;
-        let pred = slice[mid-1] === 'TAI' ? 'Xỉu' : 'Tài';
-        return {
-            type: `Cầu gương ${len}`,
-            prediction: pred,
-            confidence: 76,
-            detail: `Đối xứng ${slice.map(s => s === 'TAI' ? 'T' : 'X').join('')}`
-        };
-    }
-    return null;
-}
-
-// 13. Cầu chu kỳ lặp
-function phatHienCycle(results, cycle) {
-    if (results.length < cycle * 2) return null;
-    let pattern = results.slice(0, cycle);
-    for (let i = cycle; i < results.length; i++) {
-        if (results[i] !== pattern[i % cycle]) return null;
-    }
-    let next = pattern[results.length % cycle];
-    return {
-        type: `Chu kỳ ${cycle} phiên`,
-        prediction: next === 'TAI' ? 'Tài' : 'Xỉu',
-        confidence: 80,
-        detail: `Lặp mỗi ${cycle} phiên (${pattern.map(p => p === 'TAI' ? 'T' : 'X').join('')})`
-    };
-}
-
-// 14. Cầu cộng dồn tổng
-function phatHienSumTrend(data, direction) {
-    if (data.length < 3) return null;
-    let sums = data.slice(0, 10).map(d => d.point);
-    let count = 0;
-    for (let i = 0; i < sums.length - 1; i++) {
-        if (direction === 'up' && sums[i] < sums[i+1]) count++;
-        if (direction === 'down' && sums[i] > sums[i+1]) count++;
-    }
-    if (count >= sums.length - 2) {
-        return {
-            type: direction === 'up' ? 'Tổng tăng dần' : 'Tổng giảm dần',
-            prediction: direction === 'up' ? 'Tài' : 'Xỉu',
-            confidence: 72,
-            detail: `Xu hướng ${direction === 'up' ? 'tăng' : 'giảm'} liên tục`
-        };
-    }
-    return null;
-}
-
-// 15. Cầu dựa vào xúc xắc
-function phatHienDicePattern(data) {
-    if (data.length < 3) return null;
-    let recent = data.slice(0, 5);
-    let highCount = 0, lowCount = 0;
-    recent.forEach(d => {
-        [d.dices[0], d.dices[1], d.dices[2]].forEach(face => {
-            if (face >= 4) highCount++; else lowCount++;
-        });
-    });
-    if (highCount >= 10) return { type: 'Xúc xắc cao (4-5-6)', prediction: 'Xỉu', confidence: 74, detail: `Mặt cao ${highCount}/15 lần` };
-    if (lowCount >= 10) return { type: 'Xúc xắc thấp (1-2-3)', prediction: 'Tài', confidence: 74, detail: `Mặt thấp ${lowCount}/15 lần` };
-    return null;
-}
-
-// 16. Cầu 1-1-2-2
-function phatHien1122(results) {
-    if (results.length < 4) return null;
-    let a = results[0], b = results[1], c = results[2], d = results[3];
-    if (a === b && b !== c && c === d) {
-        return { type: 'Cầu 1-1-2-2 (Bệt đôi)', prediction: c === 'TAI' ? 'Xỉu' : 'Tài', confidence: 77, detail: `${a === 'TAI' ? 'T' : 'X'}${a === 'TAI' ? 'T' : 'X'}${c === 'TAI' ? 'T' : 'X'}${c === 'TAI' ? 'T' : 'X'}` };
-    }
-    return null;
-}
-
-// 17. Cầu 2-2-1-1
-function phatHien2211(results) {
-    if (results.length < 4) return null;
-    let a = results[0], b = results[1], c = results[2], d = results[3];
-    if (a !== b && b === c && c === d) {
-        return { type: 'Cầu 2-2-1-1 (Gãy đôi)', prediction: a, confidence: 77, detail: `${a === 'TAI' ? 'T' : 'X'}${b === 'TAI' ? 'T' : 'X'}${b === 'TAI' ? 'T' : 'X'}${b === 'TAI' ? 'T' : 'X'}` };
-    }
-    return null;
-}
-
-// 18. Cầu 1-2-2-1
-function phatHien1221(results) {
-    if (results.length < 6) return null;
-    let a = results[0], b = results[1], c = results[2], d = results[3], e = results[4], f = results[5];
-    if (a !== b && b === c && c === d && d !== e && e === f && a !== b) {
-        return { type: 'Cầu 1-2-2-1 (Cánh bướm)', prediction: a, confidence: 81, detail: `${a === 'TAI' ? 'T' : 'X'}${b === 'TAI' ? 'T' : 'X'}${b === 'TAI' ? 'T' : 'X'}${b === 'TAI' ? 'T' : 'X'}${e === 'TAI' ? 'T' : 'X'}${a === 'TAI' ? 'T' : 'X'}` };
-    }
-    return null;
-}
-
-// 19. Cầu 2-1-1-2
-function phatHien2112(results) {
-    if (results.length < 6) return null;
-    let a = results[0], b = results[1], c = results[2], d = results[3], e = results[4], f = results[5];
-    if (a === b && b !== c && c === d && d !== e && e === f && a !== c) {
-        return { type: 'Cầu 2-1-1-2 (Kép đơn kép)', prediction: a, confidence: 81, detail: `${a === 'TAI' ? 'T' : 'X'}${a === 'TAI' ? 'T' : 'X'}${c === 'TAI' ? 'T' : 'X'}${c === 'TAI' ? 'T' : 'X'}${e === 'TAI' ? 'T' : 'X'}${f === 'TAI' ? 'T' : 'X'}` };
-    }
-    return null;
-}
-
-// 20. Cầu 2-3-2
-function phatHien232(results) {
-    if (results.length < 7) return null;
-    let a = results[0], b = results[1], c = results[2], d = results[3], e = results[4], f = results[5], g = results[6];
-    if (a === b && a === c && c !== d && d === e && d !== f && f === g && a !== d && d !== f) {
-        return { type: 'Cầu 2-3-2', prediction: f === 'TAI' ? 'Xỉu' : 'Tài', confidence: 82, detail: `2 ${a === 'TAI' ? 'T' : 'X'}, 3 ${d === 'TAI' ? 'T' : 'X'}, 2 ${f === 'TAI' ? 'T' : 'X'}` };
-    }
-    return null;
-}
-
-// ======================= TỔNG HỢP TẤT CẢ CẦU =======================
-function tongHopCau(history) {
-    if (!history || !history.length) return { prediction: 'Tài', confidence: 50, reason: 'Chưa đủ dữ liệu' };
     
     const results = history.map(h => h.resultTruyenThong);
-    const data = history;
-    let allDetections = [];
+    const len = results.length;
     
-    // Quét tất cả các loại cầu
-    for (let i = 2; i <= 8; i++) {
-        let bet = phatHienBet(results, i);
-        if (bet) allDetections.push(bet);
+    // 1. Bệt 3-8 phiên
+    for (let betLen = 3; betLen <= 8; betLen++) {
+        if (len < betLen) continue;
+        let isBet = true;
+        for (let i = 1; i < betLen; i++) {
+            if (results[i] !== results[0]) { isBet = false; break; }
+        }
+        if (isBet) {
+            const pred = results[0] === 'TAI' ? 'Tài' : 'Xỉu';
+            const conf = Math.min(88, 50 + betLen * 5);
+            return { prediction: pred, confidence: conf, reason: `🔴 Cầu bệt ${betLen} phiên ${pred}` };
+        }
     }
     
-    for (let i = 3; i <= 10; i++) {
-        let zz = phatHienZiczac11(results, i);
-        if (zz) allDetections.push(zz);
+    // 2. Đảo 1-1 (ziczac)
+    for (let daoLen = 4; daoLen <= 12; daoLen++) {
+        if (len < daoLen) continue;
+        let isDao = true;
+        for (let i = 1; i < daoLen; i++) {
+            if (results[i] === results[i-1]) { isDao = false; break; }
+        }
+        if (isDao) {
+            const pred = results[daoLen-1] === 'TAI' ? 'Xỉu' : 'Tài';
+            const conf = Math.min(85, 55 + daoLen * 2.5);
+            return { prediction: pred, confidence: conf, reason: `🟡 Cầu đảo 1-1 dài ${daoLen} nhịp → ${pred}` };
+        }
     }
     
-    for (let i = 2; i <= 5; i++) {
-        let c22 = phatHien22(results, i);
-        if (c22) allDetections.push(c22);
+    // 3. Cầu 2-2
+    if (len >= 4) {
+        const a = results[0] === 'TAI' ? 'T' : 'X';
+        const b = results[1] === 'TAI' ? 'T' : 'X';
+        const c = results[2] === 'TAI' ? 'T' : 'X';
+        const d = results[3] === 'TAI' ? 'T' : 'X';
+        if (a === b && b !== c && c === d) {
+            const pred = c === 'T' ? 'Xỉu' : 'Tài';
+            return { prediction: pred, confidence: 80, reason: `🟢 Cầu 2-2 (${a}${b}${c}${d}) → ${pred}` };
+        }
     }
     
-    for (let i = 1; i <= 3; i++) {
-        let c33 = phatHien33(results, i);
-        if (c33) allDetections.push(c33);
-        let c44 = phatHien44(results, i);
-        if (c44) allDetections.push(c44);
-        let c55 = phatHien55(results, i);
-        if (c55) allDetections.push(c55);
+    // 4. Cầu 3-3
+    if (len >= 6) {
+        const a = results[0] === 'TAI' ? 'T' : 'X';
+        const b = results[3] === 'TAI' ? 'T' : 'X';
+        const ok1 = results[0] === results[1] && results[1] === results[2];
+        const ok2 = results[3] === results[4] && results[4] === results[5];
+        if (ok1 && ok2 && a !== b) {
+            const pred = b === 'T' ? 'Xỉu' : 'Tài';
+            return { prediction: pred, confidence: 82, reason: `🟣 Cầu 3-3 (${a.repeat(3)}${b.repeat(3)}) → ${pred}` };
+        }
     }
     
-    let c121 = phatHien121(results);
-    if (c121) allDetections.push(c121);
-    
-    let c212 = phatHien212(results);
-    if (c212) allDetections.push(c212);
-    
-    let c123 = phatHien123(results);
-    if (c123) allDetections.push(c123);
-    
-    let c321 = phatHien321(results);
-    if (c321) allDetections.push(c321);
-    
-    for (let step of [2, 3]) {
-        let nhay = phatHienNhayCoc(results, step);
-        if (nhay) allDetections.push(nhay);
+    // 5. Cầu 1-2-1
+    if (len >= 4) {
+        const a = results[0] === 'TAI' ? 'T' : 'X';
+        const b = results[1] === 'TAI' ? 'T' : 'X';
+        const c = results[2] === 'TAI' ? 'T' : 'X';
+        const d = results[3] === 'TAI' ? 'T' : 'X';
+        if (a !== b && b === c && c !== d && a === d) {
+            const pred = a === 'T' ? 'Tài' : 'Xỉu';
+            return { prediction: pred, confidence: 83, reason: `🎯 Cầu 1-2-1 (${a}${b}${c}${d}) → ${pred}` };
+        }
     }
     
-    for (let len of [4, 6, 8]) {
-        let guong = phatHienGuong(results, len);
-        if (guong) allDetections.push(guong);
+    // 6. Cầu 2-1-2
+    if (len >= 5) {
+        const a = results[0] === 'TAI' ? 'T' : 'X';
+        const b = results[1] === 'TAI' ? 'T' : 'X';
+        const c = results[2] === 'TAI' ? 'T' : 'X';
+        const d = results[3] === 'TAI' ? 'T' : 'X';
+        const e = results[4] === 'TAI' ? 'T' : 'X';
+        if (a === b && b !== c && c === d && d !== e && a !== c) {
+            const pred = a === 'T' ? 'Xỉu' : 'Tài';
+            return { prediction: pred, confidence: 84, reason: `🎯 Cầu 2-1-2 (${a}${b}${c}${d}${e}) → ${pred}` };
+        }
     }
     
-    for (let cycle of [2, 3, 4, 5]) {
-        let cyclePat = phatHienCycle(results, cycle);
-        if (cyclePat) allDetections.push(cyclePat);
+    // 7. Cầu nhảy cóc
+    if (len >= 5) {
+        const v1 = results[0];
+        const v2 = results[2];
+        const v3 = results[4];
+        if (v1 === v2 && v2 === v3) {
+            const pred = v1 === 'TAI' ? 'Tài' : 'Xỉu';
+            return { prediction: pred, confidence: 76, reason: `🐸 Cầu nhảy cóc 3 bước → ${pred}` };
+        }
     }
     
-    let sumUp = phatHienSumTrend(data, 'up');
-    if (sumUp) allDetections.push(sumUp);
-    let sumDown = phatHienSumTrend(data, 'down');
-    if (sumDown) allDetections.push(sumDown);
-    
-    let dice = phatHienDicePattern(data);
-    if (dice) allDetections.push(dice);
-    
-    let c1122 = phatHien1122(results);
-    if (c1122) allDetections.push(c1122);
-    
-    let c2211 = phatHien2211(results);
-    if (c2211) allDetections.push(c2211);
-    
-    let c1221 = phatHien1221(results);
-    if (c1221) allDetections.push(c1221);
-    
-    let c2112 = phatHien2112(results);
-    if (c2112) allDetections.push(c2112);
-    
-    let c232 = phatHien232(results);
-    if (c232) allDetections.push(c232);
-    
-    // Nếu không có cầu nào, dùng xu hướng 3 phiên cuối
-    if (allDetections.length === 0) {
-        let last3 = results.slice(0, 3);
-        let tai3 = last3.filter(r => r === 'TAI').length;
-        let defaultPred = tai3 >= 2 ? 'Tài' : 'Xỉu';
-        return { prediction: defaultPred, confidence: 60, reason: `Xu hướng 3 phiên cuối (${tai3}T-${3-tai3}X)` };
+    // 8. Cẩu 1-1-2-2
+    if (len >= 4) {
+        const a = results[0] === 'TAI' ? 'T' : 'X';
+        const b = results[2] === 'TAI' ? 'T' : 'X';
+        if (results[0] === results[1] && results[2] === results[3] && results[0] !== results[2]) {
+            const pred = b === 'T' ? 'Xỉu' : 'Tài';
+            return { prediction: pred, confidence: 78, reason: `🔷 Cầu 1-1-2-2 (${a}${a}${b}${b}) → ${pred}` };
+        }
     }
     
-    // Chọn cầu có độ tin cậy cao nhất
-    let best = allDetections.reduce((max, cur) => cur.confidence > max.confidence ? cur : max, allDetections[0]);
-    return {
-        prediction: best.prediction,
-        confidence: best.confidence,
-        reason: `${best.type} (${best.detail})`
+    // 9. Nóng 7/10
+    const last10 = results.slice(0, Math.min(10, len));
+    const tai10 = last10.filter(r => r === 'TAI').length;
+    if (tai10 >= 7) {
+        return { prediction: 'Xỉu', confidence: 78, reason: `🔥 Tài nóng ${tai10}/10, bẻ Xỉu` };
+    }
+    if (tai10 <= 3) {
+        return { prediction: 'Tài', confidence: 78, reason: `❄️ Xỉu nóng ${10-tai10}/10, bẻ Tài` };
+    }
+    
+    // 10. Chênh lệch 30 phiên
+    const last30 = results.slice(0, Math.min(30, len));
+    const tai30 = last30.filter(r => r === 'TAI').length;
+    const xiu30 = last30.length - tai30;
+    const diff = Math.abs(tai30 - xiu30);
+    if (diff >= 6) {
+        const pred = tai30 > xiu30 ? 'Xỉu' : 'Tài';
+        const conf = 68 + Math.min(15, diff);
+        return { prediction: pred, confidence: conf, reason: `⚖️ Chênh ${tai30}/${xiu30} (${diff}) → ${pred}` };
+    }
+    
+    // 11. Xu hướng 3 phiên cuối
+    const last3 = results.slice(0, 3);
+    const tai3 = last3.filter(r => r === 'TAI').length;
+    const pred = tai3 >= 2 ? 'Tài' : 'Xỉu';
+    return { 
+        prediction: pred, 
+        confidence: 62, 
+        reason: `📈 Xu hướng 3 phiên cuối (${tai3}T-${3-tai3}X) → ${pred}` 
     };
 }
 
-// ======================= LƯU & CẬP NHẬT KẾT QUẢ =======================
-function loadPredictions() {
+// ======================= LƯU TRỮ =======================
+function loadData() {
     try {
         if (fs.existsSync(HISTORY_FILE)) {
             predictionsDB = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
-            console.log(`📂 Đã tải ${predictionsDB.length} dự đoán`);
+            console.log(`✅ Loaded ${predictionsDB.length} predictions`);
         }
-    } catch(e) { console.error('Lỗi load:', e.message); }
+    } catch(e) { console.log('No existing data'); }
 }
 
-function savePredictions() {
+function saveData() {
     try {
         fs.writeFileSync(HISTORY_FILE, JSON.stringify(predictionsDB, null, 2));
-    } catch(e) { console.error('Lỗi lưu:', e.message); }
+    } catch(e) { console.log('Save error:', e.message); }
 }
 
 function addPrediction(phien, prediction, confidence, reason) {
+    if (predictionsDB.some(p => p.phien === phien)) return;
+    
     predictionsDB.unshift({
         phien: phien,
-        du_doan: prediction,
-        ty_le: confidence + '%',
-        ly_do: reason,
-        ket_qua_thuc_te: null,
-        trang_thai: '⏳ Chờ',
-        timestamp: new Date().toISOString(),
+        prediction: prediction,
+        confidence: confidence + '%',
+        reason: reason,
+        actual: null,
+        result: null,
+        time: new Date().toISOString(),
         id: '@tranhoang2286'
     });
-    if (predictionsDB.length > 200) predictionsDB = predictionsDB.slice(0, 200);
-    savePredictions();
+    if (predictionsDB.length > 300) predictionsDB = predictionsDB.slice(0, 300);
+    saveData();
 }
 
-function updatePredictionResult(phien, actualResult) {
+function updateResult(phien, actual) {
     const pred = predictionsDB.find(p => p.phien === phien);
-    if (pred && !pred.ket_qua_thuc_te) {
-        pred.ket_qua_thuc_te = actualResult;
-        pred.trang_thai = (pred.du_doan === actualResult) ? '✅ WIN' : '❌ LOSE';
-        savePredictions();
+    if (pred && !pred.actual) {
+        pred.actual = actual;
+        pred.result = pred.prediction === actual ? 'WIN' : 'LOSE';
+        saveData();
         return true;
     }
     return false;
 }
 
-// ======================= FETCH & AUTO VERIFY =======================
-async function fetchTele68() {
-    try {
-        const res = await axios.get(API_URL, { timeout: 10000 });
-        if (res.data && res.data.list && res.data.list.length) return res.data.list;
-        return null;
-    } catch(e) { console.error('Lỗi fetch:', e.message); return null; }
-}
-
-async function autoVerify() {
-    const history = await fetchTele68();
-    if (!history) return;
-    for (const session of history) {
+// ======================= AUTO UPDATE =======================
+async function autoUpdateResults() {
+    const data = await checkApiStatus();
+    if (!data) return;
+    for (const session of data) {
         const actual = session.resultTruyenThong === 'TAI' ? 'Tài' : 'Xỉu';
-        updatePredictionResult(session.id, actual);
+        updateResult(session.id, actual);
     }
 }
 
-// ======================= API =======================
-app.get('/', (req, res) => {
-    res.json({ name: 'API Tài Xỉu Tele68 - Full Cầu', version: '4.0', author: '@tranhoang2286', endpoints: ['/du-doan', '/lich-su', '/thong-ke', '/reset'] });
-});
+// ======================= GIAO DIỆN HTML =======================
+function getDashboardHTML() {
+    return `<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>🎲 Tài Xỉu Tele68 - Pro</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 16px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .header {
+            text-align: center;
+            margin-bottom: 24px;
+            padding: 16px 20px;
+            background: rgba(255,255,255,0.08);
+            backdrop-filter: blur(12px);
+            border-radius: 32px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .header h1 { font-size: 1.6rem; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .live-badge { display: inline-block; background: #ef4444; padding: 4px 12px; border-radius: 50px; font-size: 0.7rem; font-weight: bold; margin-top: 8px; animation: pulse 1s infinite; }
+        .update-timer { font-size: 0.7rem; color: #aaa; margin-top: 6px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+        .stat-card { background: rgba(255,255,255,0.08); backdrop-filter: blur(12px); border-radius: 20px; padding: 14px; text-align: center; border: 1px solid rgba(255,255,255,0.05); }
+        .stat-card .value { font-size: 1.8rem; font-weight: bold; margin: 6px 0; font-family: monospace; }
+        .stat-card .label { color: #aaa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; }
+        .win { color: #4ade80; }
+        .lose { color: #f87171; }
+        .pending { color: #fbbf24; }
+        .prediction-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 40px;
+            padding: 28px 20px;
+            text-align: center;
+            margin-bottom: 24px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+        }
+        .prediction-label { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 3px; opacity: 0.8; }
+        .prediction-value { font-size: 3.5rem; font-weight: 800; margin: 12px 0; text-shadow: 0 0 20px rgba(0,0,0,0.3); letter-spacing: 4px; }
+        .confidence { font-size: 1.1rem; font-weight: 600; }
+        .reason { font-size: 0.85rem; opacity: 0.9; margin-top: 10px; background: rgba(0,0,0,0.2); display: inline-block; padding: 6px 16px; border-radius: 40px; }
+        .history-section { background: rgba(0,0,0,0.3); backdrop-filter: blur(12px); border-radius: 24px; padding: 16px; overflow-x: auto; }
+        .section-title { margin-bottom: 16px; font-size: 1rem; font-weight: 600; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        th, td { padding: 8px 6px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.08); }
+        th { background: rgba(255,255,255,0.05); font-weight: 600; }
+        .badge-win { background: #22c55e; color: white; padding: 3px 8px; border-radius: 20px; font-size: 0.65rem; display: inline-block; }
+        .badge-lose { background: #ef4444; color: white; padding: 3px 8px; border-radius: 20px; font-size: 0.65rem; display: inline-block; }
+        .badge-pending { background: #eab308; color: black; padding: 3px 8px; border-radius: 20px; font-size: 0.65rem; display: inline-block; }
+        @media (max-width: 640px) {
+            .prediction-value { font-size: 2.5rem; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            th, td { font-size: 0.65rem; padding: 6px 3px; }
+        }
+        .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+        .dot-green { background: #22c55e; }
+        .dot-red { background: #ef4444; }
+        .dot-yellow { background: #eab308; }
+        .text-tai { color: #f87171; font-weight: bold; }
+        .text-xiu { color: #60a5fa; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎲 TÀI XỈU TELE68 PRO</h1>
+            <div class="live-badge">🔴 LIVE 3 GIÂY</div>
+            <div class="update-timer" id="timerText">Đang cập nhật...</div>
+        </div>
+        <div class="stats-grid" id="statsGrid">
+            <div class="stat-card"><div class="label">📊 Tổng</div><div class="value" id="totalPred">0</div></div>
+            <div class="stat-card"><div class="label">✅ Thắng</div><div class="value win" id="totalWin">0</div></div>
+            <div class="stat-card"><div class="label">❌ Thua</div><div class="value lose" id="totalLose">0</div></div>
+            <div class="stat-card"><div class="label">📈 Tỉ lệ</div><div class="value" id="winRate">0%</div></div>
+            <div class="stat-card"><div class="label">⏳ Chờ</div><div class="value pending" id="totalPending">0</div></div>
+        </div>
+        <div class="prediction-card">
+            <div class="prediction-label">🎲 DỰ ĐOÁN PHIÊN TIẾP THEO</div>
+            <div class="prediction-value" id="prediction">--</div>
+            <div class="confidence" id="confidence">🎯 --</div>
+            <div class="reason" id="reason">--</div>
+        </div>
+        <div class="history-section">
+            <div class="section-title">📜 LỊCH SỬ 20 PHIÊN GẦN NHẤT</div>
+            <div id="historyTable"><div style="text-align:center;padding:20px;">Đang tải...</div></div>
+        </div>
+    </div>
+    <script>
+        let countdown = 3;
+        async function fetchData() {
+            try {
+                const response = await fetch('/api/prediction');
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('prediction').innerHTML = data.du_doan;
+                    document.getElementById('confidence').innerHTML = '🎯 Độ tin cậy: ' + data.do_tin_cay;
+                    document.getElementById('reason').innerHTML = '📐 ' + data.ly_do;
+                    document.getElementById('totalPred').innerText = data.thong_ke.tong_du_doan;
+                    document.getElementById('totalWin').innerText = data.thong_ke.thang;
+                    document.getElementById('totalLose').innerText = data.thong_ke.thua;
+                    document.getElementById('totalPending').innerText = data.thong_ke.dang_cho;
+                    document.getElementById('winRate').innerHTML = data.thong_ke.ti_le_win;
+                    const winRate = parseFloat(data.thong_ke.ti_le_win);
+                    const winRateEl = document.getElementById('winRate');
+                    if (winRate >= 60) winRateEl.style.color = '#4ade80';
+                    else if (winRate >= 50) winRateEl.style.color = '#fbbf24';
+                    else winRateEl.style.color = '#f87171';
+                }
+                await loadHistory();
+            } catch(e) { console.error(e); }
+        }
+        async function loadHistory() {
+            try {
+                const response = await fetch('/api/history');
+                const data = await response.json();
+                if (data.history && data.history.length) {
+                    let html = '<table><thead><tr><th>Phiên</th><th>Dự đoán</th><th>Tỉ lệ</th><th>Cầu</th><th>Kết quả</th><th>Status</th></tr></thead><tbody>';
+                    for (let i = 0; i < Math.min(data.history.length, 20); i++) {
+                        const h = data.history[i];
+                        let predClass = h.prediction === 'Tài' ? 'text-tai' : 'text-xiu';
+                        let actualHtml = '<span class="badge-pending">⏳ Chờ</span>';
+                        let statusHtml = '<span class="badge-pending">⏳</span>';
+                        if (h.result === 'WIN') { actualHtml = '<span><span class="dot dot-green"></span>' + h.actual + '</span>'; statusHtml = '<span class="badge-win">✅ WIN</span>'; }
+                        else if (h.result === 'LOSE') { actualHtml = '<span><span class="dot dot-red"></span>' + h.actual + '</span>'; statusHtml = '<span class="badge-lose">❌ LOSE</span>'; }
+                        else if (h.actual) { actualHtml = '<span><span class="dot dot-yellow"></span>' + h.actual + '</span>'; }
+                        html += \`<tr><td>#\${h.phien}</td><td class="\${predClass}"><strong>\${h.prediction}</strong></td><td>\${h.confidence}</td><td style="font-size:0.7rem;max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">\${h.reason || '--'}</td><td>\${actualHtml}</td><td>\${statusHtml}</td></tr>\`;
+                    }
+                    html += '</tbody><table>';
+                    document.getElementById('historyTable').innerHTML = html;
+                } else { document.getElementById('historyTable').innerHTML = '<div style="text-align:center;padding:20px;">Chưa có dữ liệu</div>'; }
+            } catch(e) { document.getElementById('historyTable').innerHTML = '<div style="text-align:center;padding:20px;">Lỗi tải</div>'; }
+        }
+        function updateTimer() { const timerEl = document.getElementById('timerText'); if (timerEl) { timerEl.innerHTML = '⏱️ Cập nhật sau: ' + countdown + ' giây'; } countdown--; if (countdown < 0) { countdown = 3; fetchData(); } }
+        fetchData();
+        setInterval(updateTimer, 1000);
+    </script>
+</body>
+</html>`;
+}
 
-app.get('/du-doan', async (req, res) => {
+// ======================= API ENDPOINTS =======================
+app.get('/', (req, res) => { res.send(getDashboardHTML()); });
+
+app.get('/api/prediction', async (req, res) => {
     try {
-        const history = await fetchTele68();
-        if (!history || history.length === 0) return res.status(503).json({ error: 'Không lấy được dữ liệu' });
-        
-        await autoVerify();
-        const latestPhien = history[0].id;
-        const nextPhien = latestPhien + 1;
-        const analysis = tongHopCau(history);
-        
+        const history = await checkApiStatus();
+        if (!history || history.length === 0) return res.status(503).json({ error: 'Tele68 API đang chết' });
+        await autoUpdateResults();
+        const currentPhien = history[0].id;
+        const nextPhien = currentPhien + 1;
+        const analysis = phatHienCau(history);
         addPrediction(nextPhien, analysis.prediction, analysis.confidence, analysis.reason);
-        
-        const resolved = predictionsDB.filter(p => p.ket_qua_thuc_te !== null);
-        const won = resolved.filter(p => p.trang_thai === '✅ WIN').length;
-        const lost = resolved.filter(p => p.trang_thai === '❌ LOSE').length;
-        
-        res.json({
-            phien_hien_tai: nextPhien,
-            du_doan: analysis.prediction,
-            ti_le_tin_cay: analysis.confidence + '%',
-            cau_phat_hien: analysis.reason,
-            thong_ke: {
-                tong: predictionsDB.length,
-                thang: won,
-                thua: lost,
-                ti_le: resolved.length ? ((won / resolved.length) * 100).toFixed(1) + '%' : '0%'
-            },
-            id: '@tranhoang2286'
-        });
-    } catch(err) {
-        res.status(500).json({ error: err.message });
-    }
+        const resolved = predictionsDB.filter(p => p.result);
+        const won = resolved.filter(p => p.result === 'WIN').length;
+        const lost = resolved.filter(p => p.result === 'LOSE').length;
+        const pending = predictionsDB.length - resolved.length;
+        res.json({ success: true, phien: nextPhien, du_doan: analysis.prediction, do_tin_cay: analysis.confidence + '%', ly_do: analysis.reason, thong_ke: { tong_du_doan: predictionsDB.length, thang: won, thua: lost, dang_cho: pending, ti_le_win: resolved.length ? ((won / resolved.length) * 100).toFixed(1) + '%' : '0%' }, id: '@tranhoang2286' });
+    } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/lich-su', async (req, res) => {
-    await autoVerify();
-    res.json({ type: 'Tele68 Tài Xỉu', tong_so: predictionsDB.length, danh_sach: predictionsDB, id: '@tranhoang2286' });
-});
+app.get('/api/history', async (req, res) => { await autoUpdateResults(); res.json({ success: true, history: predictionsDB, id: '@tranhoang2286' }); });
 
-app.get('/thong-ke', async (req, res) => {
-    await autoVerify();
-    const resolved = predictionsDB.filter(p => p.ket_qua_thuc_te !== null);
-    const won = resolved.filter(p => p.trang_thai === '✅ WIN').length;
-    const lost = resolved.filter(p => p.trang_thai === '❌ LOSE').length;
-    res.json({
-        tong_phien: predictionsDB.length,
-        da_xong: resolved.length,
-        thang: won,
-        thua: lost,
-        ti_le_thang: resolved.length ? ((won / resolved.length) * 100).toFixed(2) + '%' : '0%',
-        id: '@tranhoang2286'
-    });
-});
+app.get('/api/stats', async (req, res) => { await autoUpdateResults(); const resolved = predictionsDB.filter(p => p.result); const won = resolved.filter(p => p.result === 'WIN').length; const lost = resolved.filter(p => p.result === 'LOSE').length; res.json({ tong: predictionsDB.length, thang: won, thua: lost, ti_le: resolved.length ? ((won / resolved.length) * 100).toFixed(2) + '%' : '0%', id: '@tranhoang2286' }); });
 
-app.get('/reset', (req, res) => {
-    predictionsDB = [];
-    savePredictions();
-    res.json({ success: true, message: 'Đã xóa hết', id: '@tranhoang2286' });
-});
+app.get('/reset', (req, res) => { predictionsDB = []; saveData(); res.json({ success: true, message: 'Đã xóa lịch sử', id: '@tranhoang2286' }); });
 
-loadPredictions();
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🚀 API ĐẦY ĐỦ CẦU tại port ${PORT}`);
-    console.log(`   Cầu có sẵn: Bệt (2-8), 1-1 (3-10), 2-2 (2-5), 3-3, 4-4, 5-5, 1-2-1, 2-1-2, 1-2-3, 3-2-1, nhảy cóc, gương, chu kỳ, xu hướng tổng, xúc xắc, 1-1-2-2, 2-2-1-1, 1-2-2-1, 2-1-1-2, 2-3-2`);
-    setTimeout(() => autoVerify(), 3000);
+// ======================= START =======================
+loadData();
+app.listen(PORT, '0.0.0.0', async () => {
+    console.log(`\n🚀 DASHBOARD TELE68 - PORT ${PORT}`);
+    console.log(`🌐 Mở trình duyệt: http://localhost:${PORT}`);
+    console.log(`👤 ID: @tranhoang2286\n`);
+    await autoUpdateResults();
 });
